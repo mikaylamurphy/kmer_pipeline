@@ -1,0 +1,237 @@
+## A k-mer based pipeline for comparing microbial genomic data 
+## Developed by Mikayla Murphy as part of an undergraduate research project with PhD candidate, Fatima Aysha Hussain 
+## Polz Lab at MIT
+## mikayla@mit.edu
+## fatimah@mit.edu
+## Last updated 13 June 2018
+
+import os
+import rpy2.robjects as robjects
+import sys
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# # Get file paths and kmer length from user.
+# strain_file = raw_input("First data input file path (resistant genome): ")
+# anc_file = raw_input("Second data input file path (reference genome): ")
+# genome_size = raw_input("If genome size other than 110M is desired, enter it now: ")
+# if not genome_size:
+#   genome_size = "110M"
+# kmer_length = raw_input("What number kmers do you want? ")
+
+strain_file = sys.argv[1]
+anc_file = sys.argv[2]
+genome_size = '110M'
+kmer_length = 31
+
+def reformat_fa_names(orig_file, new_file, prefix):
+    # Fix the names on the fa file and split into lines.
+    orig = open(orig_file, 'r')
+    new = open(new_file, 'w')
+
+    orig_lines = orig.readlines()
+    count = 0
+    for line in orig_lines:
+      if '>' not in line:
+        new.write('>STRAIN_' + str(count) + '\n')
+        new.write(line)
+        count += 1
+
+    orig.close()
+    new.close()
+
+reformat_fa_names(strain_file, 'strain.fa', '>STRAIN_')
+reformat_fa_names(anc_file, 'anc.fa', '>ANC_')
+
+
+strain_file = 'strain.fa'
+anc_file = 'anc.fa'
+
+
+def run_jellyfish(input_file, output_name):
+    # Run Jellyfish count.
+    jellyfish_count = "jellyfish count -m " + str(kmer_length) + ' -s ' + str(genome_size) + ' -t 10 -C ' + str(input_file)
+    os.system(jellyfish_count)
+    os.system("jellyfish histo mer_counts.jf -o histo_" + output_name + ".tsv")
+    os.system("jellyfish dump mer_counts.jf > " + output_name + ".tsv")
+
+run_jellyfish(strain_file, 'strain')
+run_jellyfish(anc_file, 'anc')
+
+
+# Find local minimums of jellyfish histograms using R.
+rstring="""
+    function(){
+        
+  a = read.table("histo_strain.tsv")
+  b = read.table("histo_anc.tsv")
+  # If desired, you can plot your determined values with the histogram to sanity check it.
+  
+  # Get the location of the minima/maxima. Note the added zero offsets  
+  # the location to get the correct indices
+  min_indexes1 = which(diff(  sign(diff( c(0,log(a[,2]))))) == 2)
+  min_indexes2 = which(diff(  sign(diff( c(0,log(b[,2]))))) == 2)
+  
+
+  # Get the actual values where the minima/maxima are located.
+  min_locs1 = a[min_indexes1, 1][1]
+  min_locs2 = b[min_indexes2, 1][1]
+
+  # Plot local minima on histograms for sanity checking.
+  png('plot_strain.png')
+  plot(log(a[,1]),log(a[,2]), type = 'l')
+  abline(v = log(min_locs1))
+  dev.off()
+
+  png('plot_anc.png')
+  plot(log(b[,1]),log(b[,2]), type = 'l')
+  abline(v = log(min_locs2))
+  dev.off()
+  
+  return(c(min_locs1, min_locs2))
+    }
+"""
+
+# Retrieve frequency cutoffs from R code.
+rfunc=robjects.r(rstring)
+r_df=rfunc()
+
+strain_cutoff = r_df[0]
+anc_cutoff = r_df[1]
+
+# Print frequency cutoffs for sanity checking.
+print 'Frequency Cutoff of Strain: ' + str(strain_cutoff)
+print 'Frequency Cutoff of Ancestor: ' + str(anc_cutoff)
+
+
+def get_kmers_above_freq_cutoff(kmers_file, freq_cutoff, result_dict):
+    '''
+    Process .tsv files from Jellyfish to add kmers (key) and their associated frequency (value) to existing dictionary if kmers are above given frequency cutoff.
+    '''
+
+    # Open file, split into lines, and remove whitespace from end of lines.
+    with open(kmers_file, "r") as file:
+        kmers_lines = [line.rstrip() for line in file]
+
+    line_num = 0
+
+    # Iterate through all lines in file.
+    while line_num < len(kmers_lines):
+        curr_line = kmers_lines[line_num]
+
+        # If a frequncy is in the line, get frequency and kmer sequence from next line.
+        if '>' in curr_line:
+            freq = int(curr_line[1:])
+            kmer = kmers_lines[line_num + 1]
+
+            # If frequency of kmer is above cutoff, add to dictionary.
+            if freq >= freq_cutoff:
+                result_dict[kmer] = freq
+
+            # Skip line containing kmer sequence.
+            line_num += 2
+
+        # If an empty line or something else unexpected exists, print it and skip line.
+        else:
+            print("Warning! " + file + " may have unexpected formatting.")
+            line_num += 1
+
+strain_kmers = {}
+anc_kmers = {}
+get_kmers_above_freq_cutoff("strain.tsv", strain_cutoff, strain_kmers)
+get_kmers_above_freq_cutoff("anc.tsv", anc_cutoff, anc_kmers)
+
+print "Length of strain kmers:", len(strain_kmers)
+print "Length of ancestor kmers:", len(anc_kmers)
+
+
+def create_unique_kmers_fa_file(file_type, strain_dict, anc_dict, freq_multiplier = None):
+    '''
+    Create .fa files for kmers that are unique or above freq_multiplier cutoff.
+    '''
+    # Initialize write file.
+    with open("unique_" + file_type + ".fa", "w") as file:
+
+        # Set dictionaries according to which file we are generating.
+        main_dict = strain_dict if file_type == "strain" else anc_dict
+        comparison_dict = anc_dict if file_type == "strain" else strain_dict
+
+        # Initialize kmer count for .fa file formatting.
+        count = 0
+
+        for kmer in main_dict:
+            # If kmer is unique, add it to file.
+            if kmer not in comparison_dict:
+                file.write(">kmer" + str(count) + "\n" + kmer + "\n")
+                count += 1
+            # If kmer is not unique but above frequency multiplier, add it to file.
+            elif freq_multiplier != None and main_dict[kmer] > freq_multiplier * comparison_dict[kmer]:
+                file.write(">kmer" + str(count) + "\n" + kmer + "\n")
+                count += 1
+
+create_unique_kmers_fa_file("strain", strain_kmers, anc_kmers)
+create_unique_kmers_fa_file("anc", strain_kmers, anc_kmers)
+
+
+# Run Bowtie2 with unique kmers from strain as input.
+os.system('bowtie2-build -f ' + str(strain_file) + ' BASE_strain')
+os.system('bowtie2 --score-min L,0,0 -f -x BASE_strain -U unique_strain.fa -S bowtieoutput_strain.txt')
+
+# Run Bowtie2 with unique kmers from ancestor as input.
+os.system('bowtie2-build -f ' + str(anc_file) + ' BASE_anc')
+os.system('bowtie2 --score-min L,0,0 -f -x BASE_anc -U unique_anc.fa -S bowtieoutput_anc.txt')
+
+
+# Remove unneeded lines from raw bowtie output for strain, leaving only the contig names.
+os.system('grep -vE LN: bowtieoutput_strain.txt > bowtieoutput_strain_part2.txt')
+os.system('cut -f3 -d$"\t" bowtieoutput_strain_part2.txt > bowtieoutput_strain_contigs.txt')
+os.system('grep -vE PN: bowtieoutput_strain_contigs.txt > bowtieoutput_strain_contigs2.txt')
+os.system('grep -vE SO: bowtieoutput_strain_contigs2.txt > bowtieoutput_contigs_strain.txt')
+
+# Remove unneeded lines from raw bowtie output for ancestor, leaving only the contig names.
+os.system('grep -vE LN: bowtieoutput_anc.txt > bowtieoutput_anc_part2.txt')
+os.system('cut -f3 -d$"\t" bowtieoutput_anc_part2.txt > bowtieoutput_anc_contigs.txt')
+os.system('grep -vE PN: bowtieoutput_anc_contigs.txt > bowtieoutput_anc_contigs2.txt')
+os.system('grep -vE SO: bowtieoutput_anc_contigs2.txt > bowtieoutput_contigs_anc.txt')
+
+
+def create_bowtie_fa_file(bowtie_output, orig_file, output_file):
+    '''
+    Creates bowtie_results_(strain, anc).fa file from contig names from bowtie output.
+    '''
+    with open(bowtie_output, "r") as file:
+        wanted_contigs = [line.rstrip() for line in file]
+    wanted_contigs = set(wanted_contigs)
+
+    orig_contigs = open(orig_file, "r")
+    output_file = open(output_file, "w")
+
+    copy = False
+    for line in orig_contigs:
+        if '>' in line:
+            name = line[1:-1] # Remove beginning '>' and trailing '\n'
+            copy = name in wanted_contigs
+        if copy:
+            output_file.write(line)
+
+    orig_contigs.close()
+    output_file.close()
+
+
+create_bowtie_fa_file("bowtieoutput_contigs_strain.txt", strain_file, "bowtie_results_strain.fa")
+create_bowtie_fa_file("bowtieoutput_contigs_anc.txt", anc_file, "bowtie_results_anc.fa")
+
+
+# Prints size of bowtie output .fa files, for sanity checking.
+strain_file_size = os.path.getsize('bowtie_results_strain.fa')
+anc_file_size = os.path.getsize('bowtie_results_anc.fa')
+print 'Bowtie Strain Output File Size (in bytes): ' + str(strain_file_size)
+print 'Bowtie Ancestor Output File Size (in bytes): ' + str(anc_file_size)
+
+
+# Run SPAdes.
+os.system('spades.py --sc --only-assembler -s bowtie_results_strain.fa -o spades_output_strain')
+os.system('spades.py --sc --only-assembler -s bowtie_results_anc.fa -o spades_output_anc')
+

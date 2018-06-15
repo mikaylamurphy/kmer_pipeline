@@ -1,0 +1,201 @@
+## Processing results of k-mer pipeline for analysis
+## Developed by Mikayla Murphy as part of an undergraduate research project with PhD candidate, Fatima Aysha Hussain 
+## Polz Lab at MIT
+## mikayla@mit.edu
+## fatimah@mit.edu
+## Last updated 13 June 2018
+
+import os
+import sys
+
+mummer_original = open('mummer.out')
+fna_file_original = open(sys.argv[1])
+fxn_file = open(sys.argv[2])
+
+# Parse MUMmer file.
+contigs_list = []
+mummer = mummer_original.readlines()
+for line in mummer:
+	if '>' in line:
+		current_node = line[2:].strip()
+	elif '>' not in line:
+		mummer_line = line.split()
+		length = int(mummer_line[3].replace(' ', ''))
+		start_pos = int(mummer_line[1].replace(' ', ''))
+		end_pos = start_pos + length
+
+		contigs_list.append((current_node, mummer_line[0].replace(' ', ''), start_pos, end_pos))
+
+
+# Parse .fna file.
+fna_file = fna_file_original.readlines()
+fna_dict = {}
+
+for line in fna_file:
+	if '>' in line:
+		# Remove '>' from beginning of line and split line on spaces.
+		line = line[1:].split()
+
+		# Get full name of contig, just the main contig name, and then the part number within the contig.
+		contig_full = line[0]
+		contig_name = '_'.join(contig_full.split('_')[:-1])
+		contig_num = int(contig_full.split('_')[-1])
+
+		# Put contigs in fna_dict, first under the contig name key, and then under the contig_num key.
+		if contig_name in fna_dict:
+			# Value is equal to (start, stop , strand).
+			fna_dict[contig_name][contig_num] = (contig_full, int(line[2]), int(line[4]), int(line[6]))
+		else:
+			fna_dict[contig_name] = {contig_num : (contig_full, int(line[2]), int(line[4]), int(line[6]))}
+
+to_write = []
+failure_count = 0
+
+for contig in contigs_list:
+	current_node, contig_name, start_pos, end_pos = contig
+	current_node_split = current_node.split('_')
+
+	try:
+		search_fna = fna_dict[contig_name]
+	except:
+		failure_count += 1
+		print "Can't find contig in .fna file."
+		continue
+
+	function = []
+	function_num = []
+	downstream = None
+	upstream = None
+	for contig2_index in sorted(search_fna.keys()):
+
+		contig_2, start_pos_2, end_pos_2, strand2 = search_fna[contig2_index]
+
+		# Check if start is in contig.
+		if start_pos >= start_pos_2 and start_pos <= end_pos_2:
+			function.append(contig_2)
+			function_num.append(contig2_index)
+
+			if contig2_index == 0 or contig2_index == 1:
+				upstream = 'End'
+			else:
+				upstream = search_fna[contig2_index - 1][0]
+
+
+			# Find what contigs are covered before the end.
+			while end_pos >= end_pos_2:
+				contig2_index += 1
+				if contig2_index in search_fna:
+					contig_3, start_pos_3, end_pos_3, strand3 = search_fna[contig2_index]
+					if end_pos >= start_pos_3:
+						function.append(contig_3)
+						function_num.append(contig2_index)
+					else:
+						contig2_index -= 1
+					end_pos_2 = end_pos_3
+				else:
+					function.append('End')
+					end_pos_2 = float('inf')
+
+			if contig2_index + 1 in search_fna:
+				downstream = search_fna[contig2_index + 1][0]
+			else:
+				downstream = 'End'
+			
+			break
+
+		# Start is intergenic.
+		elif start_pos <= start_pos_2:
+
+			if contig2_index == 0 or contig2_index == 1:
+				upstream = 'End'
+			else:
+				upstream = search_fna[contig2_index - 1][0]
+
+
+			if end_pos <= end_pos_2:
+				function.append(contig_2)
+				function_num.append(contig2_index)
+
+
+			# Find what contigs are covered before the end.
+			while end_pos >= end_pos_2:
+				contig2_index += 1
+				if contig2_index in search_fna:
+					contig_3, start_pos_3, end_pos_3, strand3 = search_fna[contig2_index]
+					if end_pos >= start_pos_3:
+						function.append(contig_3)
+						function_num.append(contig2_index)
+					else:
+						contig2_index -= 1
+					end_pos_2 = end_pos_3
+				else:
+				#	function.append('End')
+					end_pos_2 = float('inf')
+
+			if contig2_index + 1 in search_fna:
+				downstream = search_fna[contig2_index + 1][0]
+			else:
+				downstream = 'End'
+			
+			break
+
+	# If it begins after the last contig
+	if downstream == None and upstream == None:
+		upstream = search_fna[sorted(search_fna.keys())[-1]][0]
+		downstream = 'End'
+
+	to_write.append((current_node, contig_name, function_num, start_pos, end_pos, end_pos - start_pos, upstream, function, downstream))
+
+print("Failure Count:", failure_count)
+
+
+# Parse. fxn file.
+with open(fxn_file, "r") as file:
+    fxn_lines = [line.rstrip() for line in file]
+
+fxn_dict = {}
+for line in fxn_lines:
+  line = line.split("\t")
+  fxn_dict[line[1]] = line[2]
+
+function_file = open('function_file.txt', 'w')
+
+table_writer = []
+table_writer.append(['Node', 'Ref Region', 'Start Pos', 'End Pos', 'Length', 'Upstream', 'Function', 'Downstream'])
+for entry in to_write:
+	current_node, contig, function_num, start_pos, end_pos, length, upstream, function, downstream = entry
+	ref_region = contig + '_' + str(function_num)
+
+	if upstream in fxn_dict:
+		upstream = fxn_dict[upstream]
+	elif upstream != 'End':
+		upstream = 'Unannotated'
+
+	if downstream in fxn_dict:
+		downstream = fxn_dict[downstream]
+	elif downstream != 'End':
+		downstream = 'Unannotated'
+
+	for func_index in range(len(function)):
+		if function[func_index] in fxn_dict:
+			function[func_index] = fxn_dict[function[func_index]]
+		elif function[func_index] != 'End':
+			function[func_index] = 'Unannotated'
+
+	table_writer.append([current_node, ref_region, str(start_pos), str(end_pos), str(length), upstream, str(function), downstream])
+
+
+widths = [max(map(len, col)) + 4 for col in zip(*table_writer)]
+for row in table_writer:
+	function_file.write("".join((val.ljust(width) for val, width in zip(row, widths))) + '\n')
+
+
+fna_file_original.close()
+fxn_file.close()
+mummer_original.close()
+function_file.close()
+
+
+
+
+
